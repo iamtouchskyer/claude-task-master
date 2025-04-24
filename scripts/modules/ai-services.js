@@ -94,13 +94,13 @@ function getAvailableAIModel(options = {}) {
 	const { claudeOverloaded = false, requiresResearch = false } = options;
 
 	// Check for explicitly specified model provider in environment
-	const modelProvider = process.env.MODEL_PROVIDER?.toLowerCase() || '';
+	const modelProvider = process.env.MODEL_PROVIDER?.toLowerCase() || 'deepseek';
 	
-	// If DeepSeek is explicitly specified as provider
-	if (modelProvider === 'deepseek' && process.env.DEEPSEEK_API_KEY) {
+	// First choice: DeepSeek (now default)
+	if (process.env.DEEPSEEK_API_KEY) {
 		try {
 			const client = getDeepSeekClient();
-			log('info', 'Using DeepSeek as specified model provider');
+			log('info', 'Using DeepSeek as model provider');
 			return { type: 'deepseek', client };
 		} catch (error) {
 			log('warn', `DeepSeek not available: ${error.message}`);
@@ -108,60 +108,27 @@ function getAvailableAIModel(options = {}) {
 		}
 	}
 	
-	// First choice: Perplexity if research is required and it's available
+	// Second choice: Perplexity if research is required
 	if (requiresResearch && process.env.PERPLEXITY_API_KEY) {
 		try {
 			const client = getPerplexityClient();
 			return { type: 'perplexity', client };
 		} catch (error) {
 			log('warn', `Perplexity not available: ${error.message}`);
-			// Fall through to Claude
 		}
 	}
 
-	// Second choice: Claude if not overloaded
-	if (!claudeOverloaded && process.env.ANTHROPIC_API_KEY) {
-		return { type: 'claude', client: anthropic };
-	}
-	
-	// Third choice: DeepSeek as fallback if available (and not explicitly rejected)
-	if (modelProvider !== 'perplexity' && process.env.DEEPSEEK_API_KEY) {
-		try {
-			const client = getDeepSeekClient();
-			log('info', 'Claude is overloaded or unavailable, using DeepSeek');
-			return { type: 'deepseek', client };
-		} catch (error) {
-			log('warn', `DeepSeek fallback not available: ${error.message}`);
-			// Fall through to other options
-		}
-	}
-
-	// Fourth choice: Perplexity as Claude fallback (even if research not required)
-	if (process.env.PERPLEXITY_API_KEY) {
-		try {
-			const client = getPerplexityClient();
-			log('info', 'Claude is overloaded, falling back to Perplexity AI');
-			return { type: 'perplexity', client };
-		} catch (error) {
-			log('warn', `Perplexity fallback not available: ${error.message}`);
-			// Fall through to Claude anyway with warning
-		}
-	}
-
-	// Last resort: Use Claude even if overloaded (might fail)
+	// Last resort: Claude if available
 	if (process.env.ANTHROPIC_API_KEY) {
 		if (claudeOverloaded) {
-			log(
-				'warn',
-				'Claude is overloaded but no alternatives are available. Proceeding with Claude anyway.'
-			);
+			log('warn', 'Claude is overloaded but will be used as fallback');
 		}
 		return { type: 'claude', client: anthropic };
 	}
 
 	// No models available
 	throw new Error(
-		'No AI models available. Please set ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, and/or PERPLEXITY_API_KEY.'
+		'No AI models available. Please set DEEPSEEK_API_KEY, PERPLEXITY_API_KEY, or ANTHROPIC_API_KEY.'
 	);
 }
 

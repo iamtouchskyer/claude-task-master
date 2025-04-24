@@ -57,6 +57,7 @@
 		"lru-cache": "^10.2.0",
 		"openai": "^4.96.0",
 		"ora": "^8.2.0",
+		"task-master-ai": "^0.12.1",
 		"uuid": "^11.1.0"
 	},
 	"engines": {

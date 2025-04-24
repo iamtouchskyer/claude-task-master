@@ -7,15 +7,16 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-// Load environment variables
-dotenv.config();
+// Load environment variables with fallback to .env.example
+const envPath = fs.existsSync('.env') ? '.env' : '.env.example';
+dotenv.config({ path: envPath });
 
-// 添加更多环境信息日志
+// Constants
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
 
-// 创建日志目录
+// Create logs directory
 const logDir = path.join(projectRoot, 'logs');
 if (!fs.existsSync(logDir)) {
     fs.mkdirSync(logDir, { recursive: true });
@@ -24,19 +25,26 @@ if (!fs.existsSync(logDir)) {
 const logFilePath = path.join(logDir, 'mcp-server.log');
 const debugStream = fs.createWriteStream(logFilePath, { flags: 'a' });
 
-// 增强日志功能
+// Enhanced logging functionality
 function enhancedLog(level, message) {
     const timestamp = new Date().toISOString();
     const logMessage = `[${timestamp}] [${level.toUpperCase()}] ${message}`;
     
-    // 控制台输出
-    console.log(logMessage);
+    // Console output based on LOG_LEVEL
+    const logLevels = ['debug', 'info', 'warn', 'error'];
+    const configuredLevel = process.env.LOG_LEVEL?.toLowerCase() || 'info';
+    const configuredLevelIndex = logLevels.indexOf(configuredLevel);
+    const currentLevelIndex = logLevels.indexOf(level.toLowerCase());
     
-    // 文件日志
+    if (currentLevelIndex >= configuredLevelIndex) {
+        console.log(logMessage);
+    }
+    
+    // Always write to file log
     debugStream.write(logMessage + '\n');
 }
 
-// 添加自定义日志方法
+// Custom logger with environment-aware logging
 const debugLogger = {
     info: (message) => enhancedLog('info', message),
     warn: (message) => enhancedLog('warn', message),
@@ -44,59 +52,75 @@ const debugLogger = {
     debug: (message) => enhancedLog('debug', message)
 };
 
-// 打印环境信息
-debugLogger.info('=== MCP Server Starting ===');
-debugLogger.info(`Node.js version: ${process.version}`);
-debugLogger.info(`Working directory: ${process.cwd()}`);
-debugLogger.info(`Project root: ${projectRoot}`);
-debugLogger.info(`MODEL_PROVIDER: ${process.env.MODEL_PROVIDER || 'not set'}`);
-debugLogger.info(`DEEPSEEK_MODEL: ${process.env.DEEPSEEK_MODEL || 'not set'}`);
-debugLogger.info(`ANTHROPIC_API_KEY: ${process.env.ANTHROPIC_API_KEY ? 'Set (masked)' : 'Not set'}`);
-debugLogger.info(`DEEPSEEK_API_KEY: ${process.env.DEEPSEEK_API_KEY ? 'Set (masked)' : 'Not set'}`);
-debugLogger.info(`PERPLEXITY_API_KEY: ${process.env.PERPLEXITY_API_KEY ? 'Set (masked)' : 'Not set'}`);
+// Load and validate environment configuration
+function validateConfig() {
+    const requiredVars = ['DEEPSEEK_API_KEY'];
+    const missingVars = requiredVars.filter(
+        (varName) => !process.env[varName]
+    );
+
+    if (missingVars.length > 0) {
+        throw new Error(
+            `Missing required environment variables: ${missingVars.join(', ')}`
+        );
+    }
+}
+
+// Print environment configuration
+function logEnvironment() {
+    debugLogger.info('=== MCP Server Configuration ===');
+    debugLogger.info(`Node.js version: ${process.version}`);
+    debugLogger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    debugLogger.info(`Working directory: ${process.cwd()}`);
+    debugLogger.info(`Project root: ${projectRoot}`);
+    debugLogger.info(`Log level: ${process.env.LOG_LEVEL || 'info'}`);
+    debugLogger.info(`Debug mode: ${process.env.DEBUG === 'true' ? 'enabled' : 'disabled'}`);
+    
+    // Log AI configuration with DeepSeek first
+    debugLogger.info('\n=== AI Configuration ===');
+    debugLogger.info(`Model provider: ${process.env.MODEL_PROVIDER || 'deepseek'}`);
+    debugLogger.info(`DeepSeek model: ${process.env.DEEPSEEK_MODEL || 'deepseek-chat'}`);
+    debugLogger.info(`DeepSeek API key: ${process.env.DEEPSEEK_API_KEY ? 'Set (masked)' : 'Not set'}`);
+    debugLogger.info('\n=== Optional AI Providers ===');
+    debugLogger.info(`Anthropic model: ${process.env.MODEL || 'claude-3-7-sonnet-20250219'}`);
+    debugLogger.info(`Anthropic API key: ${process.env.ANTHROPIC_API_KEY ? 'Set (masked)' : 'Not set'}`);
+    debugLogger.info(`Perplexity model: ${process.env.PERPLEXITY_MODEL || 'sonar-pro'}`);
+    debugLogger.info(`Perplexity API key: ${process.env.PERPLEXITY_API_KEY ? 'Set (masked)' : 'Not set'}`);
+
+    // Log model settings
+    debugLogger.info('\n=== Model Settings ===');
+    debugLogger.info(`Max tokens: ${process.env.MAX_TOKENS || '4000'}`);
+    debugLogger.info(`Temperature: ${process.env.TEMPERATURE || '0.2'}`);
+    
+    // Log task configuration
+    debugLogger.info('\n=== Task Configuration ===');
+    debugLogger.info(`Project name: ${process.env.PROJECT_NAME || 'Task Master'}`);
+    debugLogger.info(`Default subtasks: ${process.env.DEFAULT_SUBTASKS || '3'}`);
+    debugLogger.info(`Default priority: ${process.env.DEFAULT_PRIORITY || 'medium'}`);
+}
 
 /**
  * Start the MCP server
  */
 async function startServer() {
-	const server = new TaskMasterMCPServer();
-
-	// Handle graceful shutdown
-	process.on('SIGINT', async () => {
-		debugLogger.info('Received SIGINT signal. Shutting down...');
-		await server.stop();
-		process.exit(0);
-	});
-
-	process.on('SIGTERM', async () => {
-		debugLogger.info('Received SIGTERM signal. Shutting down...');
-		await server.stop();
-		process.exit(0);
-	});
-
-	// 添加全局未捕获异常处理
-	process.on('uncaughtException', (error) => {
-		debugLogger.error(`Uncaught Exception: ${error.message}`);
-		debugLogger.error(error.stack);
-	});
-
-	process.on('unhandledRejection', (reason, promise) => {
-		debugLogger.error(`Unhandled Promise Rejection at: ${promise}, reason: ${reason}`);
-		if (reason instanceof Error) {
-			debugLogger.error(reason.stack);
-		}
-	});
-
-	try {
-		debugLogger.info('Starting MCP server...');
-		await server.start();
-		debugLogger.info('MCP server started successfully');
-	} catch (error) {
-		debugLogger.error(`Failed to start MCP server: ${error.message}`);
-		debugLogger.error(error.stack);
-		logger.error(`Failed to start MCP server: ${error.message}`);
-		process.exit(1);
-	}
+    try {
+        // Validate required environment variables
+        validateConfig();
+        
+        // Log environment configuration
+        logEnvironment();
+        
+        // Initialize server with validated configuration
+        const server = new TaskMasterMCPServer();
+        await server.init();
+        await server.start();
+        debugLogger.info('MCP server started successfully');
+    } catch (error) {
+        debugLogger.error(`Failed to start MCP server: ${error.message}`);
+        debugLogger.error(error.stack);
+        logger.error(`Failed to start MCP server: ${error.message}`);
+        process.exit(1);
+    }
 }
 
 // Start the server
