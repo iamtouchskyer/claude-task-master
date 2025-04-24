@@ -13,6 +13,8 @@ let silentMode = false;
 // Configuration and constants
 const CONFIG = {
 	model: process.env.MODEL || 'claude-3-7-sonnet-20250219',
+	deepseekModel: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+	modelProvider: process.env.MODEL_PROVIDER || 'anthropic',
 	maxTokens: parseInt(process.env.MAX_TOKENS || '4000'),
 	temperature: parseFloat(process.env.TEMPERATURE || '0.7'),
 	debug: process.env.DEBUG === 'true',

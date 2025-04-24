@@ -31,7 +31,10 @@ MCP (Model Control Protocol) provides the easiest way to get started with Task M
 			"env": {
 				"ANTHROPIC_API_KEY": "YOUR_ANTHROPIC_API_KEY_HERE",
 				"PERPLEXITY_API_KEY": "YOUR_PERPLEXITY_API_KEY_HERE",
-				"MODEL": "claude-3-7-sonnet-20250219",
+				 "DEEPSEEK_API_KEY": "YOUR_DEEPSEEK_API_KEY_HERE",
+				"MODEL_PROVIDER": "deepseek",
+				"MODEL": "deepseek-chat",
+				"DEEPSEEK_MODEL": "deepseek-chat",
 				"PERPLEXITY_MODEL": "sonar-pro",
 				"MAX_TOKENS": "64000",
 				"TEMPERATURE": "0.2",

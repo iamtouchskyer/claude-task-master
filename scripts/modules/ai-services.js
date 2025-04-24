@@ -24,6 +24,43 @@ const anthropic = new Anthropic({
 	}
 });
 
+// Lazy-loaded DeepSeek client
+let deepseek = null;
+
+/**
+ * Get or initialize the DeepSeek client
+ * @returns {OpenAI} DeepSeek client (using OpenAI compatible SDK)
+ */
+function getDeepSeekClient() {
+	if (!deepseek) {
+		if (!process.env.DEEPSEEK_API_KEY) {
+			log('error', 'DEEPSEEK_API_KEY environment variable is missing. Set it to use DeepSeek models.');
+			throw new Error(
+				'DEEPSEEK_API_KEY environment variable is missing. Set it to use DeepSeek models.'
+			);
+		}
+		
+		log('info', 'Initializing DeepSeek client with OpenAI SDK compatibility');
+		
+		try {
+			// DeepSeek API is compatible with OpenAI's SDK
+			deepseek = new OpenAI({
+				apiKey: process.env.DEEPSEEK_API_KEY,
+				baseURL: 'https://api.deepseek.com/v1'
+			});
+			
+			log('info', `DeepSeek client initialized successfully with baseURL: https://api.deepseek.com/v1`);
+		} catch (error) {
+			log('error', `Failed to initialize DeepSeek client: ${error.message}`);
+			if (CONFIG.debug) {
+				log('debug', 'DeepSeek initialization error:', error);
+			}
+			throw error;
+		}
+	}
+	return deepseek;
+}
+
 // Lazy-loaded Perplexity client
 let perplexity = null;
 
@@ -56,6 +93,21 @@ function getPerplexityClient() {
 function getAvailableAIModel(options = {}) {
 	const { claudeOverloaded = false, requiresResearch = false } = options;
 
+	// Check for explicitly specified model provider in environment
+	const modelProvider = process.env.MODEL_PROVIDER?.toLowerCase() || '';
+	
+	// If DeepSeek is explicitly specified as provider
+	if (modelProvider === 'deepseek' && process.env.DEEPSEEK_API_KEY) {
+		try {
+			const client = getDeepSeekClient();
+			log('info', 'Using DeepSeek as specified model provider');
+			return { type: 'deepseek', client };
+		} catch (error) {
+			log('warn', `DeepSeek not available: ${error.message}`);
+			// Fall through to other options
+		}
+	}
+	
 	// First choice: Perplexity if research is required and it's available
 	if (requiresResearch && process.env.PERPLEXITY_API_KEY) {
 		try {
@@ -71,12 +123,24 @@ function getAvailableAIModel(options = {}) {
 	if (!claudeOverloaded && process.env.ANTHROPIC_API_KEY) {
 		return { type: 'claude', client: anthropic };
 	}
+	
+	// Third choice: DeepSeek as fallback if available (and not explicitly rejected)
+	if (modelProvider !== 'perplexity' && process.env.DEEPSEEK_API_KEY) {
+		try {
+			const client = getDeepSeekClient();
+			log('info', 'Claude is overloaded or unavailable, using DeepSeek');
+			return { type: 'deepseek', client };
+		} catch (error) {
+			log('warn', `DeepSeek fallback not available: ${error.message}`);
+			// Fall through to other options
+		}
+	}
 
-	// Third choice: Perplexity as Claude fallback (even if research not required)
+	// Fourth choice: Perplexity as Claude fallback (even if research not required)
 	if (process.env.PERPLEXITY_API_KEY) {
 		try {
 			const client = getPerplexityClient();
-			log('info', 'Claude is overloaded, falling back to Perplexity');
+			log('info', 'Claude is overloaded, falling back to Perplexity AI');
 			return { type: 'perplexity', client };
 		} catch (error) {
 			log('warn', `Perplexity fallback not available: ${error.message}`);
@@ -97,7 +161,7 @@ function getAvailableAIModel(options = {}) {
 
 	// No models available
 	throw new Error(
-		'No AI models available. Please set ANTHROPIC_API_KEY and/or PERPLEXITY_API_KEY.'
+		'No AI models available. Please set ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, and/or PERPLEXITY_API_KEY.'
 	);
 }
 
@@ -138,6 +202,40 @@ function handleClaudeError(error) {
 }
 
 /**
+ * Handle AI API errors with user-friendly messages
+ * @param {Error} error - The error from AI API
+ * @returns {string} User-friendly error message
+ */
+function handleAIError(error) {
+	// First check if it's a Claude-specific error
+	if (error.type === 'error' && error.error) {
+		return handleClaudeError(error);
+	}
+	
+	// Check for DeepSeek-specific errors
+	if (error.message?.toLowerCase().includes('deepseek')) {
+		// DeepSeek uses OpenAI-compatible error format
+		return `DeepSeek API error: ${error.message}`;
+	}
+	
+	// Check for Perplexity-specific errors
+	if (error.message?.toLowerCase().includes('perplexity')) {
+		return `Perplexity API error: ${error.message}`;
+	}
+	
+	// Check for network/timeout errors (common to all APIs)
+	if (error.message?.toLowerCase().includes('timeout')) {
+		return 'The request to the AI service timed out. Please try again.';
+	}
+	if (error.message?.toLowerCase().includes('network')) {
+		return 'There was a network error connecting to the AI service. Please check your internet connection and try again.';
+	}
+
+	// Default error message
+	return `Error communicating with AI service: ${error.message}`;
+}
+
+/**
  * Call Claude to generate tasks from a PRD
  * @param {string} prdContent - PRD content
  * @param {string} prdPath - Path to the PRD file
@@ -162,6 +260,12 @@ async function callClaude(
 ) {
 	try {
 		log('info', 'Calling Claude...');
+
+			// 强制使用DeepSeek客户端当MODEL_PROVIDER=deepseek
+		if (process.env.MODEL_PROVIDER?.toLowerCase() === 'deepseek') {
+			log('info', 'Using DeepSeek as specified in MODEL_PROVIDER');
+			aiClient = getDeepSeekClient();
+		}
 
 		// Build the system prompt
 		const systemPrompt = `You are an AI assistant tasked with breaking down a Product Requirements Document (PRD) into a set of sequential development tasks. Your goal is to create exactly <num_tasks>${numTasks}</num_tasks> well-structured, actionable development tasks based on the PRD provided.
@@ -244,7 +348,7 @@ Your response should be valid JSON only, with no additional explanation or comme
 		);
 	} catch (error) {
 		// Get user-friendly error message
-		const userMessage = handleClaudeError(error);
+		const userMessage = handleAIError(error);
 		log('error', userMessage);
 
 		// Retry logic for certain errors
@@ -327,59 +431,71 @@ async function handleStreamingRequest(
 	if (reportProgress) {
 		await reportProgress({ progress: 0 });
 	}
-	let responseText = '';
-	let streamingInterval = null;
-
+	
 	try {
-		// Use streaming for handling large responses
-		const stream = await (aiClient || anthropic).messages.create({
-			model:
-				modelConfig?.model || session?.env?.ANTHROPIC_MODEL || CONFIG.model,
-			max_tokens:
-				modelConfig?.maxTokens || session?.env?.MAX_TOKENS || maxTokens,
-			temperature:
-				modelConfig?.temperature ||
-				session?.env?.TEMPERATURE ||
-				CONFIG.temperature,
+			// 强制使用DeepSeek客户端当MODEL_PROVIDER=deepseek
+		if (process.env.MODEL_PROVIDER?.toLowerCase() === 'deepseek') {
+			report(`Using DeepSeek as specified in MODEL_PROVIDER`, 'info');
+			aiClient = getDeepSeekClient();
+		}
+		
+		// Determine which client we're using
+		const clientType = determineClientType(aiClient);
+		report(`Using ${clientType} client for task generation`, 'info');
+		
+		// Get model name based on client type
+		let modelName;
+		switch (clientType) {
+			case 'deepseek':
+				modelName = modelConfig?.model || session?.env?.DEEPSEEK_MODEL || process.env.DEEPSEEK_MODEL || 'deepseek-chat';
+				break;
+			case 'perplexity':
+				modelName = modelConfig?.model || session?.env?.PERPLEXITY_MODEL || process.env.PERPLEXITY_MODEL || 'sonar-pro';
+				break;
+			case 'anthropic':
+			default:
+				modelName = modelConfig?.model || session?.env?.MODEL || CONFIG.model;
+				break;
+		}
+		
+		// Common parameters for all models
+		const commonParams = {
+			model: modelName,
+			max_tokens: modelConfig?.maxTokens || session?.env?.MAX_TOKENS || maxTokens,
+			temperature: modelConfig?.temperature || session?.env?.TEMPERATURE || CONFIG.temperature,
 			system: systemPrompt,
 			messages: [
 				{
 					role: 'user',
 					content: `Here's the Product Requirements Document (PRD) to break down into ${numTasks} tasks:\n\n${prdContent}`
 				}
-			],
-			stream: true
-		});
-
-		// Update loading indicator to show streaming progress - only for text output
-		if (outputFormat === 'text' && !isSilentMode()) {
-			let dotCount = 0;
-			const readline = await import('readline');
-			streamingInterval = setInterval(() => {
-				readline.cursorTo(process.stdout, 0);
-				process.stdout.write(
-					`Receiving streaming response from Claude${'.'.repeat(dotCount)}`
-				);
-				dotCount = (dotCount + 1) % 4;
-			}, 500);
+			]
+		};
+		
+		// Call appropriate streaming handler based on client type
+		let responseText = '';
+		
+		if (clientType === 'deepseek') {
+			// Use DeepSeek streaming handler
+			responseText = await _handleDeepSeekStream(
+				aiClient,
+				commonParams,
+				{ reportProgress, mcpLog, silentMode: isSilentMode() },
+				outputFormat === 'text'
+			);
+		} else if (clientType === 'perplexity') {
+			// Use Perplexity (OpenAI-compatible) handler
+			// This would need to be implemented similar to DeepSeek handler
+			throw new Error('Perplexity streaming not yet implemented for task generation');
+		} else {
+			// Default to Anthropic handler
+			responseText = await _handleAnthropicStream(
+				aiClient,
+				commonParams,
+				{ reportProgress, mcpLog, silentMode: isSilentMode() },
+				outputFormat === 'text'
+			);
 		}
-
-		// Process the stream
-		for await (const chunk of stream) {
-			if (chunk.type === 'content_block_delta' && chunk.delta.text) {
-				responseText += chunk.delta.text;
-			}
-			if (reportProgress) {
-				await reportProgress({
-					progress: (responseText.length / maxTokens) * 100
-				});
-			}
-			if (mcpLog) {
-				mcpLog.info(`Progress: ${(responseText.length / maxTokens) * 100}%`);
-			}
-		}
-
-		if (streamingInterval) clearInterval(streamingInterval);
 
 		// Only call stopLoadingIndicator if we started one
 		if (loadingIndicator && outputFormat === 'text' && !isSilentMode()) {
@@ -387,7 +503,7 @@ async function handleStreamingRequest(
 		}
 
 		report(
-			`Completed streaming response from ${aiClient ? 'provided' : 'default'} AI client!`,
+			`Completed streaming response from ${clientType} AI client!`,
 			'info'
 		);
 
@@ -401,15 +517,13 @@ async function handleStreamingRequest(
 			{ reportProgress, mcpLog, session }
 		);
 	} catch (error) {
-		if (streamingInterval) clearInterval(streamingInterval);
-
 		// Only call stopLoadingIndicator if we started one
 		if (loadingIndicator && outputFormat === 'text' && !isSilentMode()) {
 			stopLoadingIndicator(loadingIndicator);
 		}
 
 		// Get user-friendly error message
-		const userMessage = handleClaudeError(error);
+		const userMessage = handleAIError(error);
 		report(`Error: ${userMessage}`, 'error');
 
 		// Only show console error for text output (CLI)
@@ -644,7 +758,7 @@ Note on dependencies: Subtasks can depend on other subtasks with lower IDs. Use 
 				}
 				if (mcpLog) {
 					mcpLog.info(
-						`Progress: ${(responseText.length / CONFIG.maxTokens) * 100}%`
+						`Progress: ${(responseText.length / CONFIG.maxTokens) * 100}`
 					);
 				}
 			}
@@ -1194,6 +1308,154 @@ async function _handleAnthropicStream(
 }
 
 /**
+ * Handles streaming API calls to DeepSeek
+ * @param {OpenAI} client - Initialized DeepSeek client (using OpenAI SDK)
+ * @param {Object} params - Parameters for the API call
+ * @param {Object} handlers - Progress and logging handlers
+ * @param {boolean} [cliMode=false] - Whether to show CLI-specific output like spinners
+ * @returns {Promise<string>} The accumulated response text
+ */
+async function _handleDeepSeekStream(
+	client,
+	params,
+	{ reportProgress, mcpLog, silentMode } = {},
+	cliMode = false
+) {
+	// Only set up loading indicator in CLI mode and not in silent mode
+	let loadingIndicator = null;
+	let streamingInterval = null;
+	let responseText = '';
+
+	// Check both the passed parameter and global silent mode
+	const isSilent =
+		silentMode || (typeof silentMode === 'undefined' && isSilentMode());
+
+	// Only show CLI indicators if in cliMode AND not in silent mode
+	const showCLIOutput = cliMode && !isSilent;
+
+	if (showCLIOutput) {
+		loadingIndicator = startLoadingIndicator(
+			'Processing request with DeepSeek AI...'
+		);
+	}
+
+	try {
+		// Validate required parameters
+		if (!client) {
+			throw new Error('DeepSeek client is required');
+		}
+
+		if (
+			!params.messages ||
+			!Array.isArray(params.messages) ||
+			params.messages.length === 0
+		) {
+			throw new Error('At least one message is required');
+		}
+
+		// Convert Anthropic-style parameters to DeepSeek parameters (OpenAI compatible)
+		// DeepSeek uses OpenAI's API format
+		const deepseekParams = {
+			model: params.model || process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+			messages: params.messages,
+			temperature: params.temperature,
+			max_tokens: params.max_tokens,
+			stream: true
+		};
+		
+		// If a system message was provided, add it as a system message to DeepSeek format
+		// (OpenAI's format supports system messages directly)
+		if (params.system) {
+			deepseekParams.messages.unshift({
+				role: 'system',
+				content: params.system
+			});
+		}
+
+		// Call DeepSeek with streaming enabled
+		const stream = await client.chat.completions.create(deepseekParams);
+
+		// Set up streaming progress indicator for CLI
+		let dotCount = 0;
+		if (showCLIOutput) {
+			const readline = await import('readline');
+			streamingInterval = setInterval(() => {
+				readline.cursorTo(process.stdout, 0);
+				process.stdout.write(
+					`Receiving streaming response from DeepSeek${'.'.repeat(dotCount)}`
+				);
+				dotCount = (dotCount + 1) % 4;
+			}, 500);
+		}
+
+		// Process the stream (OpenAI compatible format)
+		for await (const chunk of stream) {
+			if (chunk.choices && chunk.choices[0]?.delta?.content) {
+				responseText += chunk.choices[0].delta.content;
+			}
+			
+			// Report progress
+			const maxTokens = params.max_tokens || CONFIG.maxTokens;
+			const progressPercent = Math.min(
+				100,
+				(responseText.length / maxTokens) * 100
+			);
+
+			if (reportProgress && !mcpLog && !isSilent) {
+				await reportProgress({
+					progress: progressPercent,
+					total: maxTokens
+				});
+			}
+
+			if (mcpLog) {
+				mcpLog.info(
+					`Progress: ${progressPercent}% (${responseText.length} chars generated)`
+				);
+			}
+		}
+
+		// Cleanup
+		if (streamingInterval) {
+			clearInterval(streamingInterval);
+			streamingInterval = null;
+		}
+
+		if (loadingIndicator) {
+			stopLoadingIndicator(loadingIndicator);
+			loadingIndicator = null;
+		}
+
+		// Log completion
+		if (mcpLog) {
+			mcpLog.info('Completed streaming response from DeepSeek API!');
+		} else if (!isSilent) {
+			log('info', 'Completed streaming response from DeepSeek API!');
+		}
+
+		return responseText;
+	} catch (error) {
+		// Cleanup on error
+		if (streamingInterval) {
+			clearInterval(streamingInterval);
+		}
+
+		if (loadingIndicator) {
+			stopLoadingIndicator(loadingIndicator);
+		}
+
+		// Log the error
+		if (mcpLog) {
+			mcpLog.error(`Error in DeepSeek streaming: ${error.message}`);
+		} else if (!isSilent) {
+			log('error', `Error in DeepSeek streaming: ${error.message}`);
+		}
+
+		throw new Error(`DeepSeek streaming error: ${error.message}`);
+	}
+}
+
+/**
  * Parse a JSON task from Claude's response text
  * @param {string} responseText - The full response text from Claude
  * @returns {Object} Parsed task object
@@ -1535,9 +1797,31 @@ function parseTasksFromCompletion(completionText) {
 	}
 }
 
+/**
+ * Determine the type of client
+ * @param {Object} client - AI client instance
+ * @returns {string} Client type ('anthropic', 'deepseek', 'perplexity', or 'unknown')
+ */
+function determineClientType(client) {
+	if (!client) return 'unknown';
+	
+	if (client === anthropic) return 'anthropic';
+	if (client === deepseek) return 'deepseek';
+	if (client === perplexity) return 'perplexity';
+	
+	// Check constructor name as fallback
+	const constructorName = client.constructor?.name?.toLowerCase() || '';
+	if (constructorName.includes('anthropic')) return 'anthropic';
+	if (constructorName.includes('openai') && client.baseURL?.includes('deepseek')) return 'deepseek';
+	if (constructorName.includes('openai') && client.baseURL?.includes('perplexity')) return 'perplexity';
+	
+	return 'unknown';
+}
+
 // Export AI service functions
 export {
 	getAnthropicClient,
+	getDeepSeekClient,
 	getPerplexityClient,
 	callClaude,
 	handleStreamingRequest,
@@ -1548,11 +1832,14 @@ export {
 	parseSubtasksFromText,
 	generateComplexityAnalysisPrompt,
 	handleClaudeError,
+	handleAIError,
 	getAvailableAIModel,
 	parseTaskJsonResponse,
 	_buildAddTaskPrompt,
 	_handleAnthropicStream,
+	_handleDeepSeekStream,
 	getConfiguredAnthropicClient,
 	sendChatWithContext,
-	parseTasksFromCompletion
+	parseTasksFromCompletion,
+	determineClientType
 };
